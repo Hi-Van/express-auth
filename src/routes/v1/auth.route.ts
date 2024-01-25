@@ -126,7 +126,7 @@ authRouter.post("/register", async (req: Request, res: Response) => {
   } catch (e: any) {
     // this part depends on the database you're using
     // check for unique constraint error in user table
-    return res.status(500).json({error: e.message, success: false});
+    return res.status(500).json({error: e, message: e.message, success: false});
   }
 });
 
