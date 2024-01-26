@@ -9,7 +9,7 @@ app.use(express.urlencoded({ extended: true }));
 app.use("/v1", v1Router);
 
 app.get("/", (_req: Request, res: Response) => {
-  res.send("Hello world");
+  res.sendStatus(200);
 });
 
 app.listen(port, () => {
