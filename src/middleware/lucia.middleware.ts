@@ -1,21 +1,33 @@
-import { lucia } from "lucia";
-import { express } from "lucia/middleware";
-import { prisma } from "@lucia-auth/adapter-prisma";
-import { PrismaClient } from "@prisma/client";
+import { Lucia } from "lucia";
+import { prisma } from "./prisma.middleware.js";
+import { PrismaAdapter } from "@lucia-auth/adapter-prisma";
 
-const client = new PrismaClient();
+interface DatabaseUserAttributes {
+  username: string;
+  email: string;
+}
 
-export const auth = lucia({
-  adapter: prisma(client),
-  env: process.env.NODE_ENV === "development" ? "DEV" : "PROD",
-  middleware: express(),
+const [session, user] = prisma.adapt();
+const adapter = new PrismaAdapter(session, user);
 
-  getUserAttributes: (data) => {
+export const lucia = new Lucia(adapter, {
+  sessionCookie: {
+    attributes: {
+      secure: process.env.NODE_ENV === "production",
+    },
+  },
+
+  getUserAttributes: (attributes) => {
     return {
-      username: data.username,
-      email: data.email,
+      username: attributes.username,
+      email: attributes.email,
     };
   },
 });
 
-export type Auth = typeof auth;
+declare module "lucia" {
+  interface Register {
+    Lucia: typeof lucia;
+    DatabaseUserAttributes: DatabaseUserAttributes;
+  }
+}

@@ -1,157 +1,94 @@
 import express, { Router, Request, Response } from "express";
-import { LuciaError } from "lucia";
-import { auth } from "../../../middleware/lucia.middleware.js";
-import { LoginRequest, RegisterRequest } from "./types.js";
+import * as z from "zod";
+import { prisma, lucia } from "../../../middleware/index.middleware.js";
+import { generateId } from "lucia";
+import { Argon2id } from "oslo/password";
+import { LoginRequest } from "./types.js";
 
 const authRouter: Router = express.Router();
-
-interface SignUpRequest extends Request {
-  body: {
-    username: string;
-    email: string;
-    password: string;
-  };
-}
+const argon = new Argon2id();
 
 authRouter.get("/health", (req: Request, res: Response) => {
   res.sendStatus(200);
 });
 
-authRouter.post("/login", async (req: LoginRequest, res: Response) => {
-  const { username, password } = req.body;
+authRouter.post("/register", async (req: LoginRequest, res: Response) => {
+  const schema = z.object({
+    username: z.string().min(3).max(32),
+    email: z.string().email(),
+    password: z.string().min(8).max(32),
+  });
+  const result = schema.safeParse(req.body);
 
-  const invalidUsername = username.length < 1 || username.length > 31;
-  const invalidPassword = password.length < 1 || password.length > 255;
-
-  // basic check
-  if (invalidUsername) {
-    return res.status(400).send("Invalid username");
+  if (!result.success) {
+    return res.status(400).send(result.error);
   }
-  if (invalidPassword) {
+
+  const { username, email, password } = result.data;
+  const hashedPassword = await argon.hash(password);
+  const userId = generateId(16);
+
+  const user = await prisma.createUser(userId, username, email, hashedPassword);
+  const session = await lucia.createSession(user.id, {});
+
+  return res.status(200).json({token: session.id, username});
+});
+
+authRouter.get("/login", async (req: LoginRequest, res: Response) => {
+  const schema = z.object({
+    username: z.string().min(3).max(32),
+    password: z.string().min(8).max(32),
+  });
+  const result = schema.safeParse(req.body);
+
+  if (!result.success) {
+    return res.status(400).send(result.error);
+  }
+
+  const { username, password } = result.data;
+  const user = await prisma.findUserByUsername(username);
+
+  if (!user) {
+    return res.status(400).send("User not found");
+  }
+
+  const validatePassword = await argon.verify(user.hashed_password, password);
+  if (!validatePassword) {
     return res.status(400).send("Invalid password");
   }
 
-  try {
-    // find user by key
-    // and validate password
-    const key = await auth.useKey("username", username.toLowerCase(), password);
-    const session = await auth.createSession({
-      userId: key.userId,
-      attributes: {},
-    });
-
-    // redirect to profile page
-    return res.status(200).send({ token: session.sessionId });
-  } catch (e) {
-    // check for unique constraint error in user table
-    if (
-      e instanceof LuciaError &&
-      (e.message === "AUTH_INVALID_KEY_ID" ||
-        e.message === "AUTH_INVALID_PASSWORD")
-    ) {
-      // user does not exist
-      // or invalid password
-      return res.status(400).send("Incorrect username or password");
-    }
-
-    return res.status(500).send("An unknown error occurred");
-  }
+  const session = await lucia.createSession(user.id, {});
+  return res.status(200).json({token: session.id, userId: user.id, username});
 });
 
 authRouter.post("/logout", async (req: Request, res: Response) => {
   const token = req.headers.authorization?.slice(7) ?? "";
+  const userId = req.headers["user-id"] ? req.headers["user-id"] as string : "";
 
-  try {
-    await auth.getSession(token);
-    await auth.invalidateSession(token);
-    // redirect back to login page
-    return res.sendStatus(200);
-  } catch (e) {
-    if (e instanceof LuciaError && e.message === "AUTH_INVALID_SESSION_ID") {
-      // session does not exist
-      return res.status(400).send("Invalid session token");
-    }
-
-    return res.status(500).send("An unknown error occurred");
+  if (token === "" || userId === "") {
+    return res.sendStatus(403);
   }
+
+  const { user, session } = await lucia.validateSession(token);
+
+  if (!user || !session || user.id !== userId) {
+    return res.sendStatus(400);
+  }
+
+  await lucia.invalidateSession(session.id);
+  return res.sendStatus(200);
 });
 
-authRouter.post("/register", async (req: Request, res: Response) => {
-  const { username, email, password } = req.body as {
-    username: string;
-    email: string;
-    password: string;
-  };
-
-  // basic check
-  const invalidUsername =
-    typeof username !== "string" || username.length < 1 || username.length > 31;
-  const invalidEmail =
-    typeof email !== "string" ||
-    email.length < 1 ||
-    email.length > 60 ||
-    !email.includes("@") ||
-    !email.includes(".");
-  const invalidPassword =
-    typeof password !== "string" ||
-    password.length < 1 ||
-    password.length > 255;
-
-  // basic check
-  if (invalidUsername) {
-    return res.status(400).json({ data: `invalid username: ${username}` });
+authRouter.get("/validate", async (req: Request, res: Response) => {
+  const token = req.headers.authorization?.slice(7) ?? "";
+  const userId = req.headers["user-id"] ? req.headers["user-id"] as string : "";
+  if (token === "" || userId === "") {
+    return res.sendStatus(403);
   }
-  if (invalidEmail) {
-    return res.status(400).json({ data: `invalid email: ${email}` });
-  }
-  if (invalidPassword) {
-    return res.status(400).json({ data: `invalid password: ${password}` });
-  }
-  try {
-    const user = await auth.createUser({
-      key: {
-        providerId: "username", // auth method
-        providerUserId: username.toLowerCase(), // unique id when using "username" auth method
-        password, // hashed by Lucia
-      },
-      attributes: {
-        username,
-        email,
-      },
-    });
-    const session = await auth.createSession({
-      userId: user.userId,
-      attributes: {},
-    });
 
-    // redirect to profile page
-    return res.status(200).json({ success: true, token: session.sessionId });
-  } catch (e: any) {
-    // this part depends on the database you're using
-    // check for unique constraint error in user table
-    return res
-      .status(500)
-      .json({ error: e, message: e.message, success: false });
-  }
-});
+  const { user, session } = await lucia.validateSession(token);
 
-authRouter.get("/authorize", async (req: Request, res: Response) => {
-  const token = req.headers.authorization?.slice(7) ?? ""; 
-
-  try {
-    const session = await auth.getSession(token);
-    const user = await auth.getUser(session.userId);
-
-    // redirect to profile page
-    return res.status(200).json({ success: true, user });
-  } catch (e) {
-    if (e instanceof LuciaError && e.message === "AUTH_INVALID_SESSION_ID") {
-      // session does not exist
-      return res.status(400).json({ success: false });
-    }
-
-    return res.status(500).json({ success: false });
-  }
+  return res.status(200).json({isAuthorized: session && user && user.id === userId});
 });
 
 export default authRouter;
