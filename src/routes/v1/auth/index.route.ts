@@ -31,10 +31,10 @@ authRouter.post("/register", async (req: LoginRequest, res: Response) => {
   const user = await prisma.createUser(userId, username, email, hashedPassword);
   const session = await lucia.createSession(user.id, {});
 
-  return res.status(200).json({token: session.id, username});
+  return res.status(200).json({token: session.id, userId: user.id, username});
 });
 
-authRouter.get("/login", async (req: LoginRequest, res: Response) => {
+authRouter.post("/login", async (req: LoginRequest, res: Response) => {
   const schema = z.object({
     username: z.string().min(3).max(32),
     password: z.string().min(8).max(32),
